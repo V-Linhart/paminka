@@ -1,0 +1,16 @@
+# Render Blueprint for the Påminka demo (Render dashboard -> New -> Blueprint -> pick this repo)
+services:
+  - type: web
+    name: paminka-demo
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: ANTHROPIC_API_KEY      # paste a Claude Console API key in the Render dashboard
+        sync: false
+      - key: DEMO_PASSWORD          # optional: password the browser asks for
+        sync: false

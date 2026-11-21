@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ask Claude</title>
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --text:#1d1d1b; --muted:#6b6a66; --accent:#c96442; --border:#e2e0da; --err:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1c1b19; --card:#262522; --text:#ecebe7; --muted:#a19f99; --accent:#e07a55; --border:#3a3935; --err:#f28b82; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:32px 16px; }
+  h1 { margin:0 0 4px; font-size:1.6rem; }
+  .sub { color:var(--muted); margin:0 0 20px; font-size:.9rem; }
+  #log { display:flex; flex-direction:column; gap:12px; margin-bottom:16px; }
+  .msg { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 14px; white-space:pre-wrap; }
+  .you { border-left:4px solid var(--muted); }
+  .claude { border-left:4px solid var(--accent); }
+  .err { border-left:4px solid var(--err); color:var(--err); }
+  .meta { color:var(--muted); font-size:.8rem; margin-top:6px; }
+  form { display:flex; gap:8px; }
+  textarea { flex:1; resize:vertical; min-height:56px; padding:10px; border-radius:10px; border:1px solid var(--border);
+             background:var(--card); color:var(--text); font:inherit; }
+  button { padding:0 20px; border:0; border-radius:10px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ask Claude</h1>
+  <p class="sub" id="status">Checking server…</p>
+  <div id="log"></div>
+  <form id="f">
+    <textarea id="q" placeholder="Type a question… (Enter to send, Shift+Enter for new line)"></textarea>
+    <button id="b" type="submit">Ask</button>
+  </form>
+</main>
+<script>
+const log = document.getElementById('log'), q = document.getElementById('q'), b = document.getElementById('b');
+
+function add(cls, text, meta) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  if (meta) { const m = document.createElement('div'); m.className = 'meta'; m.textContent = meta; d.appendChild(m); }
+  log.appendChild(d);
+  d.scrollIntoView({behavior: 'smooth', block: 'end'});
+  return d;
+}
+
+fetch('/status').then(r => r.json()).then(s => {
+  document.getElementById('status').textContent = s.key
+    ? `Connected · model ${s.model}`
+    : 'No API key found – add api_key.txt next to server.py and restart it.';
+}).catch(() => document.getElementById('status').textContent = 'Server not running – start it with: python server.py');
+
+document.getElementById('f').addEventListener('submit', async e => {
+  e.preventDefault();
+  const question = q.value.trim();
+  if (!question) return;
+  add('you', question);
+  q.value = ''; b.disabled = true;
+  const wait = add('claude', 'Thinking…');
+  try {
+    const r = await fetch('/ask', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                   body: JSON.stringify({question})});
+    const data = await r.json();
+    wait.remove();
+    if (data.error) add('err', data.error);
+    else add('claude', data.answer, `${data.model} · this answer $${data.cost.toFixed(4)} · session total $${data.total.toFixed(4)}`);
+  } catch (err) {
+    wait.remove();
+    add('err', 'Could not reach the server – is python server.py still running?');
+  } finally { b.disabled = false; q.focus(); }
+});
+
+q.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('f').requestSubmit(); }
+});
+</script>
+</body>
+</html>
