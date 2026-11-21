@@ -1,0 +1,11 @@
+# secrets - never upload
+api_key.txt
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# generated documents (not needed to run the demo)
+*.html.bak
+pitch_2min.html

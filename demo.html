@@ -29,6 +29,7 @@
                0 0 0 .155em var(--hdr), 0 0 0 .2em rgba(242,193,174,.4); }
   header .tag { color:var(--ring); font-size:.95rem; font-weight:500; }
   header .btns { margin-left:auto; display:flex; gap:8px; }
+  .today { color:var(--hdr-text); opacity:.85; font-size:.9rem; font-weight:500; }
   button { border:0; border-radius:12px; padding:10px 18px; font:inherit; font-weight:600; cursor:pointer; }
   #start { background:var(--accent); color:#fff; font-size:1rem; padding:12px 28px; }
   #start:hover:not(:disabled) { filter:brightness(1.08); }
@@ -89,6 +90,16 @@
   .risk .fill { height:100%; background:var(--accent); }
   #gen { background:var(--navy); color:var(--cream); width:100%; margin-top:4px; }
   @media (prefers-color-scheme: dark) { #gen { background:var(--accent); color:#fff; } }
+  #live { background:var(--accent); color:#fff; width:100%; margin-top:8px; }
+  @media (prefers-color-scheme: dark) { #live { background:transparent; color:var(--accent); border:1px solid var(--accent); } }
+  .callbox { margin-top:12px; border:1px solid var(--border); border-radius:14px; padding:12px; background:var(--soft); }
+  .callhead { display:flex; justify-content:space-between; align-items:center; gap:8px; font-weight:600; }
+  #cstat { overflow:hidden; text-overflow:ellipsis; }
+  #hang { background:#c0392b; color:#fff; padding:6px 14px; }
+  #mic { background:var(--card); color:var(--text); border:1px solid var(--border); padding:6px 10px; }
+  #cform { display:flex; gap:6px; margin-top:10px; }
+  #cform input { flex:1; min-width:0; padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:var(--card); color:var(--text); font:inherit; }
+  #cform button { background:var(--navy); color:var(--cream); padding:8px 14px; }
   .script { margin-top:14px; display:flex; flex-direction:column; gap:6px; }
   .line { padding:8px 12px; border-radius:10px; max-width:88%; font-size:.9rem; }
   .line.staff { background:var(--soft); border:1px solid var(--border); align-self:flex-start; }
@@ -113,6 +124,7 @@
     <h1 class="logo" aria-label="Påminka">P<span class="aa">a<i class="dot"></i></span>minka</h1>
     <div class="tag" id="tag">Ingen tom stol.</div>
   </div>
+  <div class="today" id="today"></div>
   <div class="clock" id="clock">🕗 08:00</div>
   <div class="btns">
     <button id="pause" disabled>⏸ Pause</button>
@@ -196,6 +208,7 @@ fetch('/patients').then(r => r.json()).then(d => {
   $('start').textContent = '▶ Start calls'; $('start').disabled = false;
   AVG = d.patients.reduce((a, p) => a + ringSecs(p) + talkSecs(p) + notesSecs(p), 0) / d.patients.length;
   resetLines(); renderLines();
+  $('today').textContent = '📅 ' + d.today + ' · calls for next week';
   $('k-called-l').textContent = `of ${d.patients.length.toLocaleString('sv-SE')} high-risk patients called`;
   const c = d.compare;
   $('foot').innerHTML = `<b>Who we call:</b> our no-show model (logistic regression on booking lead time, missed visits, severity, `
@@ -336,7 +349,123 @@ $('skip').onclick = () => {
   renderLines(); update(); finish();
 };
 
+// ---------------- live voice call (browser speech in/out, Claude runs the conversation) ----------------
+let liveCall = null;
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+function pickVoice() {
+  const vs = (window.speechSynthesis && speechSynthesis.getVoices()) || [];
+  return vs.find(v => /en-GB/i.test(v.lang) && /female|libby|sonia|google uk english female/i.test(v.name))
+      || vs.find(v => /en-GB/i.test(v.lang)) || vs.find(v => /^en/i.test(v.lang)) || null;
+}
+if (window.speechSynthesis) speechSynthesis.onvoiceschanged = () => {};
+
+function speak(text) {
+  return new Promise(resolve => {
+    if (!window.speechSynthesis) return resolve();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-GB';
+    u.rate = 1.03; u.onend = u.onerror = () => resolve();
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
+  });
+}
+
+function setStat(s) { if ($('cstat')) $('cstat').textContent = s; }
+
+function addCallLine(who, text) {
+  const div = document.createElement('div');
+  div.className = 'line ' + (who === 'patient' ? 'patient' : 'staff');
+  div.innerHTML = `<b>${who === 'patient' ? 'Patient' : '🤖 Påminka AI'}</b>`; div.append(text);
+  $('clines').appendChild(div); div.scrollIntoView({block: 'nearest'});
+  liveCall.history.push({who, text});
+}
+
+function startLiveCall(p) {
+  stopLiveCall();
+  $('script').innerHTML = '';
+  $('call').innerHTML = `<div class="callbox">
+      <div class="callhead"><span id="cstat">📞 Calling…</span>
+        <span><button id="mic" title="Listen again">🎙</button> <button id="hang">End call</button></span></div>
+      <div id="clines" class="script"></div>
+      <form id="cform"><input id="ctext" placeholder="Speak, or type the patient's answer…" autocomplete="off"><button>Send</button></form>
+      <div class="meta">${SR ? 'Speak when it says “Listening…”. Allow the microphone if the browser asks.' : 'Voice input needs Chrome or Edge – type the answers instead.'}</div>
+    </div>`;
+  liveCall = {p, history: [], ended: false, rec: null, t0: performance.now(), tries: 0};
+  if ($('gen')) $('gen').disabled = true;
+  $('live').disabled = true;
+  $('hang').onclick = () => endLiveCall('Call ended');
+  $('mic').onclick = () => { liveCall && (liveCall.tries = 0); listen(); };
+  $('cform').onsubmit = e => { e.preventDefault(); const t = $('ctext').value.trim(); if (t) { $('ctext').value = ''; patientSaid(t); } };
+  aiTurn();
+}
+
+async function aiTurn() {
+  const c = liveCall; if (!c || c.ended) return;
+  stopListening(); setStat('🤖 Påminka is thinking…');
+  try {
+    const r = await fetch('/voice', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                     body: JSON.stringify({id: c.p.id, history: c.history})});
+    const d = await r.json();
+    if (liveCall !== c || c.ended) return;
+    if (d.error) return setStat('⚠ ' + d.error);
+    addCallLine('ai', d.text);
+    setStat('🔊 Påminka is speaking…');
+    await speak(d.text);
+    if (liveCall !== c || c.ended) return;
+    if (d.end) return endLiveCall('✓ Call finished');
+    c.tries = 0; listen();
+  } catch (e) { setStat('⚠ Could not reach the server'); }
+}
+
+function patientSaid(text) {
+  const c = liveCall; if (!c || c.ended) return;
+  stopListening(); addCallLine('patient', text); aiTurn();
+}
+
+function listen() {
+  const c = liveCall; if (!c || c.ended) return;
+  if (!SR) return setStat('⌨ Your turn – type the patient\'s answer below');
+  stopListening();
+  const rec = new SR(); c.rec = rec; let finalText = '';
+  rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = false;
+  rec.onresult = ev => {
+    let interim = '';
+    for (const r of ev.results) { if (r.isFinal) finalText += r[0].transcript; else interim += r[0].transcript; }
+    setStat('🎙 ' + (finalText || interim));
+  };
+  rec.onend = () => {
+    if (liveCall !== c || c.ended || c.rec !== rec) return;
+    c.rec = null;
+    if (finalText.trim()) return patientSaid(finalText.trim());
+    if (++c.tries < 3) return listen();
+    setStat('🎙 Didn\'t hear anything – press 🎙 or type below');
+  };
+  rec.onerror = ev => { if (ev.error === 'not-allowed') { c.tries = 9; setStat('🎙 Microphone blocked – type the answers below'); } };
+  try { rec.start(); setStat('🎙 Listening…'); } catch (e) { setStat('⌨ Type the patient\'s answer below'); }
+}
+
+function stopListening() {
+  if (liveCall && liveCall.rec) { const r = liveCall.rec; liveCall.rec = null; try { r.abort(); } catch (e) {} }
+}
+
+function endLiveCall(reason) {
+  const c = liveCall; if (!c || c.ended) return;
+  c.ended = true; stopListening(); if (window.speechSynthesis) speechSynthesis.cancel();
+  const secs = Math.round((performance.now() - c.t0) / 1000);
+  setStat(`${reason} · ${Math.floor(secs/60)} min ${secs%60} s`);
+  if ($('cform')) $('cform').remove();
+  c.p._live = {history: c.history.slice(), secs};          // "View call transcript" now shows this live call
+  if ($('gen')) { $('gen').disabled = false; $('gen').textContent = '📄 View live call transcript'; }
+  if ($('live')) { $('live').disabled = false; $('live').textContent = '📞 Call again'; }
+}
+
+function stopLiveCall() {
+  if (liveCall && !liveCall.ended) endLiveCall('Call ended');
+  liveCall = null;
+}
+
 function show(p, tr) {
+  stopLiveCall();
   document.querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
   tr.classList.add('sel'); selected = p.id;
   $('detail').innerHTML = `
@@ -349,17 +478,35 @@ function show(p, tr) {
     <div class="facts">
       <div><span>Appointment</span>${p.department} · ${p.type}</div>
       <div><span>Reason</span>${p.symptoms}</div>
-      <div><span>When</span>${p.day}, ${p.month} (booked ${p.booked_days_ahead} d ahead)</div>
+      <div><span>When</span>${p.date} (booked ${p.booked_days_ahead} d ahead)</div>
       <div><span>Visit value</span>${sek(p.bill_sek)}</div>
       <div><span>Money back from this contact</span><b class="${p.saving_sek > 0 ? 'star' : 'neg'}">${sek(p.saving_sek)}</b></div>
     </div>
     <button id="gen">${OUT[p.outcome].btn}</button>
+    <button id="live">📞 Call now (live AI voice)</button>
+    <div id="call"></div>
     <div id="script"></div>`;
   $('gen').onclick = () => generate(p);
+  $('live').onclick = () => startLiveCall(p);
 }
 
 async function generate(p) {
-  const btn = $('gen'); btn.disabled = true; btn.textContent = 'Loading…';
+  const btn = $('gen');
+  if (p._live && p._live.history.length) {               // show the live call that was just made
+    const box = document.createElement('div'); box.className = 'script';
+    const head = document.createElement('div'); head.className = 'meta'; head.style.marginTop = '0';
+    head.textContent = `🎙 Live AI call (demo) · duration ${Math.floor(p._live.secs/60)} min ${p._live.secs%60} s · Påminka AI`;
+    box.appendChild(head);
+    p._live.history.forEach(h => {
+      const div = document.createElement('div');
+      div.className = 'line ' + (h.who === 'patient' ? 'patient' : 'staff');
+      div.innerHTML = `<b>${h.who === 'patient' ? 'Patient' : '🤖 Påminka AI'}</b>`; div.append(h.text);
+      box.appendChild(div);
+    });
+    $('call').innerHTML = ''; $('script').innerHTML = ''; $('script').appendChild(box); btn.remove();
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Loading…';
   try {
     const r = await fetch('/call', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: p.id, agent: p._agent})});
     const d = await r.json();

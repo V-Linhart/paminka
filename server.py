@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -70,6 +71,23 @@ def load_key() -> str | None:
     return key or None
 
 
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def today_str() -> str:
+    t = date.today()
+    return f"{WEEKDAYS[t.weekday()]} {t.day} {t.strftime('%B')} {t.year}"
+
+
+def visit_date(weekday: str) -> str:
+    """Påminka calls about a week before the visit: the visit is the first date 7-13 days from today
+    that falls on the dataset's weekday, e.g. 'Saturday 28 November'."""
+    d = date.today() + timedelta(days=7)
+    target = WEEKDAYS.index(weekday) if weekday in WEEKDAYS else d.weekday()
+    d += timedelta(days=(target - d.weekday()) % 7)
+    return f"{WEEKDAYS[d.weekday()]} {d.day} {d.strftime('%B')}"
+
+
 def plausible(r: dict) -> bool:
     """The demo dataset is synthetic: age and gender are random, so drop impossible combinations.
     Every Gynecology visit is a 'Pregnancy Checkup' -> keep only women aged 16-49."""
@@ -104,6 +122,7 @@ def load_patients() -> dict:
                          if outcome.startswith("call") else SMS_COST_SEK),
             "department": r["department"], "symptoms": r["symptoms"], "chronic": r["chronic_disease"],
             "type": r["appointment_type"], "day": r["appointment_day"], "month": r["appointment_month"],
+            "date": visit_date(r["appointment_day"]),
             "booked_days_ahead": int(r["booking_to_appointment_days"]),
             "previous": int(r["previous_appointments"]), "missed": int(r["missed_previous_appointments"]),
             "pct": float(r["no_show_pct"]) if r["no_show_pct"] else None,
@@ -199,6 +218,50 @@ SMS_SYSTEM = ("You write one short, friendly reminder SMS (under 320 characters)
               "Output only the SMS text.")
 
 
+VOICE_SYSTEM = (
+    "You are Påminka, an AI voice assistant making a LIVE reminder phone call on behalf of a hospital clinic. "
+    "Everything you write is spoken aloud by text-to-speech, so: plain spoken English, no lists, no markdown, "
+    "no emojis, 1-2 short sentences per turn, ask only one question at a time.\n"
+    "OPENING (your first turn): 'Hi, this is Påminka, the clinic's AI assistant, about a booked appointment. "
+    "I'll never ask for BankID or payment - you can always call the clinic via 1177.se instead. Am I speaking "
+    "with the person the appointment is for?'\n"
+    "PRIVACY: until the person confirms they are the patient, reveal nothing except that an appointment exists. "
+    "If it is the wrong person, do not give details; ask them to tell the patient to check the 1177 app, and end. "
+    "After confirmation you may say the day, month and department, but NEVER symptoms, diagnosis, conditions, "
+    "medicines, missed-appointment history or that they are 'high-risk'.\n"
+    "GOAL: confirm they will come; gently ask if anything could stop them (transport, work, childcare, forgetting) "
+    "and help (e.g. suggest setting a reminder, or offer that a different time the same day may be possible). "
+    "If they cannot come or want a new time, or ask for a person, say you will transfer them to a staff member "
+    "and end the call. Never ask for personal identity numbers, BankID, passwords or payment. "
+    "If the person goes off topic, answer briefly and steer back.\n"
+    "ENDING: when the call is finished, say a short goodbye (mention the booking is visible in the 1177 app if "
+    "confirmed) and put the token <END> at the very end of that final turn.")
+
+
+def voice_turn(p: dict, history: list) -> dict:
+    """One turn of a live voice call. history = [{"who": "ai"|"patient", "text": "..."}]."""
+    facts = (f"Today is {today_str()}. Appointment facts (private): {p['department']}, on {p['date']}, booked "
+             f"{p['booked_days_ahead']} days ahead. Background only, never say aloud: {p['symptoms'].lower()}.")
+    msgs = [{"role": "user", "content": f"[{facts}]\n[The call connects. The person answers: 'Hello?']"}]
+    for h in history[-30:]:
+        text = str(h.get("text", ""))[:1000].strip()
+        if text:
+            msgs.append({"role": "assistant" if h.get("who") == "ai" else "user", "content": text})
+    if msgs[-1]["role"] == "assistant":          # API needs the patient to speak last
+        msgs.append({"role": "user", "content": "(silence)"})
+    response = client.beta.messages.create(
+        model=MODEL, max_tokens=400, system=VOICE_SYSTEM,
+        output_config={"effort": "low"},
+        betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+        messages=msgs,
+    )
+    if response.stop_reason == "refusal":
+        return {"text": "I'm sorry, I can't help with that. Please call the clinic via 1177.se. Goodbye.", "end": True}
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    end = "<END>" in text
+    return {"text": text.replace("<END>", "").strip(), "end": end}
+
+
 TRANSCRIPTS: dict[str, dict] = {}   # one transcript per patient, so it looks like a stored record
 
 
@@ -211,7 +274,7 @@ def call_script(p: dict, agent: str = "") -> dict:
 def _make_script(p: dict) -> dict:
     facts = ("Do not mention the patient's age or sex. (Background only - never say symptoms or conditions aloud.) "
              f"Appointment: {p['department']} ({p['type']}), for {p['symptoms'].lower()}, "
-             f"on {p['day']} in {p['month']}, booked {p['booked_days_ahead']} days ahead. "
+             f"on {p['date']} (today is {today_str()}), booked {p['booked_days_ahead']} days ahead. "
              f"Chronic condition: {p['chronic']}.")
     if p["outcome"].startswith("call"):
         return claude(CALL_SYSTEM, facts + " " + CALL_STORY[p["outcome"]])
@@ -259,6 +322,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/patients":
             if DEMO is None:
                 return self._json(500, {"error": f"Dataset not found: {DATA}"})
+            for p in DEMO["patients"]:                # keep dates current if the server runs for days
+                p["date"] = visit_date(p["day"])
+            DEMO["today"] = today_str()
             self._json(200, DEMO)
         elif self.path == "/status":
             self._json(200, {"key": client is not None, "model": MODEL})
@@ -268,13 +334,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._authorized():
             return
-        if self.path not in ("/ask", "/call") or (self.path == "/ask" and not ASK_ENABLED):
+        if self.path not in ("/ask", "/call", "/voice") or (self.path == "/ask" and not ASK_ENABLED):
             return self._send(404, b"Not found", "text/plain")
         if client is None:
             return self._json(400, {"error": "No API key. Put it in api_key.txt "
                                              "(or set ANTHROPIC_API_KEY) and restart server.py."})
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8", errors="replace") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return self._json(400, {"error": "Bad request body."})
         try:
             if self.path == "/ask":
                 question = body.get("question", "").strip()
@@ -285,7 +354,11 @@ class Handler(BaseHTTPRequestHandler):
                 p = BY_ID.get(body.get("id", ""))
                 if p is None:
                     return self._json(404, {"error": "Unknown patient."})
-                self._json(200, call_script(p, str(body.get("agent", ""))))
+                if self.path == "/voice":
+                    history = body.get("history", [])
+                    self._json(200, voice_turn(p, history if isinstance(history, list) else []))
+                else:
+                    self._json(200, call_script(p, str(body.get("agent", ""))))
         except anthropic.AuthenticationError:
             self._json(401, {"error": "The API key was rejected - check api_key.txt."})
         except anthropic.APIStatusError as e:

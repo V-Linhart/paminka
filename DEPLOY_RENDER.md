@@ -59,6 +59,15 @@ Save → Render builds and deploys (2–3 minutes).
 Your URL looks like `https://paminka-demo.onrender.com`. The log should show
 `Demo patients loaded: 1055`.
 
+## Live AI voice call ("📞 Call now")
+
+- Click a patient → **📞 Call now (live AI voice)**: Påminka speaks (browser text-to-speech), listens through the
+  microphone (browser speech recognition) and Claude decides each answer (`/voice` in `server.py`).
+- Works best in **Chrome or Edge**; allow the microphone when asked. Render's https address is fine for the microphone.
+  Without voice input, answers can be typed in the box.
+- Each answer takes ~1.5–2.5 s; a full call costs roughly 2 US cents in Claude usage.
+- It is a browser demo of the conversation – it does not dial a real phone number.
+
 ## Good to know
 
 - **Free plan sleeps** after ~15 minutes without visitors; the first visit then takes ~30–60 s.
